@@ -1,5 +1,6 @@
 import uuid
 
+from celery import Celery
 from flask import Flask, render_template, g, session
 from flask.ext.sqlalchemy import SQLAlchemy
 import flask_sijax
@@ -11,6 +12,9 @@ app = Flask(__name__)
 app.config.from_object('config')
 db = SQLAlchemy(app)
 flask_sijax.Sijax(app)
+
+celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
+celery.conf.update(app.config)
 
 
 ''' Database '''
@@ -48,9 +52,27 @@ class Contigset(db.Model):
     userid = db.Column(db.String)
     contigs = db.relationship('Contig', backref='contigset', lazy='dynamic')
 
+''' Celery tasks '''
+@celery.task(bind=True)
+def save_contigset(self):
+    contigs = 0
+    """
+    for header, sequence in utils.parse_fasta(contig_file):
+        app.logger.debug(header)
+        app.logger.debug(sequence)
+        contig = Contig(header=header, sequence=sequence,
+                        contigset_id=contigset.id)
+        db.session.add(contig)
+        contigs += 1
+    db.session.commit()
+    """
 
 ''' Sijax '''
 class SijaxHandler(object):
+    @staticmethod
+    def contigset_save_status(obj_response, task_id):
+        task = save_contigset.AsyncResult(task_id)
+
     @staticmethod
     def _add_alert(obj_response, div, text):
         obj_response.html(div, """
@@ -87,23 +109,16 @@ class SijaxHandler(object):
         db.session.add(contigset)
         db.session.commit()
 
-        # Add data to database
+        # Add data to database async using celery
         contigs = 0
-        """
-        for header, sequence in utils.parse_fasta(contig_file):
+        for header, sequence in utils.parse_fasta(contig_file.stream):
             app.logger.debug(header)
-            app.logger.debug(sequence)
-            contig = Contig(header=header, sequence=sequence,
-                            contigset_id=contigset.id)
-            db.session.add(contig)
             contigs += 1
-        db.session.commit()
-        """
+        app.logger.debug(contigs)
 
         obj_response.html_append('#contigsetList',
             '<li class="list-group-item">'
-            '<span class="badge">{}</span>'
-            '{}</li>'.format(contigs, contigset_name))
+            '{}</li>'.format(contigset_name))
 
     @staticmethod
     def binset_form_handler(obj_response, files, form_values):
