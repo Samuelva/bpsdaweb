@@ -4,9 +4,9 @@ $(function() {
         var reader = new FileReader();
         reader.onload = function() {
             $('#binTable').find('tbody').find('tr').remove();
-            var lines = reader.result.split(/\r\n|\n/);
+            var lines = reader.result.split(/\r\n|\r|\n/);
             for (var i = 0; i < 5; i++) {
-                var data = lines[i].split(',');
+                var data = lines[i].split(/\t| |,|;/);
                 $('#binTable').find('tbody')
                     .append($('<tr>')
                             .append($('<td>').text(data[0]))
@@ -17,35 +17,28 @@ $(function() {
         reader.readAsText(e.target.files.item(0));
     });
 
-{#    $('#binsetToggle').click(function() {#}
-{#        console.log('here tbh');#}
-{#        if ($('#binsetToggle').find('span').hasClass('glyphicon-plus')) {#}
-{#            $('#binsetToggle').html('<span class="glyphicon glyphicon-minus pull-right"></span>');#}
-{#        } else {#}
-{#            $('#binsetToggle').html('<span class="glyphicon glyphicon-plus pull-right"></span>');#}
-{#        }#}
-{#    });#}
+    // Show buttons on hover and status icons otherwise
+    $('.binButtons').hide();
+    $('.bin').hover(function() {
+        $(this).children('.binButtons').show();
+        $(this).children('.binStatus').hide();
+    }, function() {
+        $(this).children('.binButtons').hide();
+        $(this).children('.binStatus').show();
+    });
 
-    $('#binsetList').find('a').click(function() {
-        if ($(this).hasClass('active')) {
-            $(this).removeClass('active');
-        } else {
-            var selected_binsets = $(this).parent().find('.active');
-            if (selected_binsets.length == 2) {
-                selected_binsets[0].removeClass('active');
-            }
-            $(this).addClass('active');
-            selected_binsets = $(this).parent().find('.active');
-            if (selected_binsets.length == 2) {
-                Sijax.request('update_chord', [selected_binsets[0].text,
-                                               selected_binsets[1].text]);
-            }
-        }
+    $('.hideBin').click(function() {
+        $(this).toggleClass('active');
+        $(this).children().toggleClass('glyphicon-eye-open glyphicon-eye-close');
+        $(this).parent().parent().find('.binStatus span').toggleClass('glyphicon-eye-close');
+        $(this).parent().parent().toggleClass('binHidden');
+        var bin = $($(this).closest('li')).prop('id');
+        var binset = $($(this).closest('div.well-sm')).prop('id');
+        toggleBin(binset.split('Item')[0], bin);
+        $('#visualiseBtn').click();
     });
 });
 </script>
-
-<h2>Data</h2>
 
 <div class="panel panel-default">
     <div class="panel-heading">
@@ -58,7 +51,7 @@ $(function() {
     </div>
 
     <div id="binsetFormPanel" class="panel-collapse collapse">
-    <div class="panel-body">
+    <div class="panel-body well">
         <div id="binsetAlerts"></div>
 
         <form id="binsetForm" name="binsetForm" method="post" enctype="multipart/form-data">
@@ -98,7 +91,33 @@ $(function() {
 
     <ul class="list-group" id="binsetList">
         {% for binset in binsets %}
-            <a href="#" class="list-group-item">{{ binset.name }}</a>
+            <a href="#{{ binset.name }}Item" data-toggle="collapse"
+               class="list-group-item" onclick="$(this).button('toggle');">
+                {{ binset.name }}
+            </a>
+            <div id="{{ binset.name }}Item" class="collapse well-sm">
+                <ul class="list-group scrollable">
+                {% for bin in binset.bins.all() %}
+                    <li class="list-group-item bin" id="{{ bin.name }}">
+                        <button id="binColor{{ binset.name }}{{ bin.name }}"
+                                style="background-color: {{ bin.color }}"
+                                class="btn btn-default colpicker"></button>
+                        {{ bin.name }}
+                        <span class="pull-right binStatus">
+                            <span class="glyphicon"></span>
+                        </span>
+                        <span class="pull-right binButtons">
+                            <button class="btn btn-xs btn-default hideBin">
+                                <span class="glyphicon glyphicon-eye-open"></span>
+                            </button>
+                            <button class="btn btn-xs btn-danger removeBin">
+                                <span class="glyphicon glyphicon-trash"></span>
+                            </button>
+                        </span>
+                    </li>
+                {% endfor %}
+                </ul>
+            </div>
         {% endfor %}
     </ul>
 </div>

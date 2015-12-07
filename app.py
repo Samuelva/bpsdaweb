@@ -1,4 +1,6 @@
+from collections import defaultdict
 import uuid
+import json
 
 from celery import Celery
 from flask import Flask, render_template, g, session
@@ -6,12 +8,14 @@ from flask.ext.sqlalchemy import SQLAlchemy
 import flask_sijax
 
 import utils
+import randomcolor
 
 
 app = Flask(__name__)
 app.config.from_object('config')
 db = SQLAlchemy(app)
 flask_sijax.Sijax(app)
+randcol = randomcolor.RandomColor()
 
 celery = Celery(app.name, broker=app.config['CELERY_BROKER_URL'])
 celery.conf.update(app.config)
@@ -28,6 +32,7 @@ class Bin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(25))
     binset_id = db.Column(db.Integer, db.ForeignKey('binset.id'))
+    color = db.Column(db.String(7), default='#ffffff')
     contigs = db.relationship('Contig', secondary=bincontig,
                               backref=db.backref('bins', lazy='dynamic'))
 
@@ -43,6 +48,7 @@ class Binset(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(50))
     userid = db.Column(db.String)
+    color = db.Column(db.String(7))
     bins = db.relationship('Bin', backref='binset', lazy='dynamic')
 
 class Contigset(db.Model):
@@ -97,9 +103,9 @@ class SijaxHandler(object):
                                     'Onjuiste input.')
             return
 
-        contigsets = Contigset.query.filter_by(name=contigset_name,
-                                               userid=session['uid']).all()
-        if len(contigsets) > 0:
+        contigset = Contigset.query.filter_by(name=contigset_name,
+                                              userid=session['uid']).first()
+        if contigset is not None:
             SijaxHandler._add_alert(obj_response, '#contigsetAlerts',
                                     'Contigs zijn al geupload.')
             return
@@ -109,16 +115,21 @@ class SijaxHandler(object):
         db.session.add(contigset)
         db.session.commit()
 
-        # Add data to database async using celery
-        contigs = 0
+        # Add data to database
+        contigs = []
         for header, sequence in utils.parse_fasta(contig_file.stream):
-            app.logger.debug(header)
-            contigs += 1
-        app.logger.debug(contigs)
+            contigs.append(Contig(header=header, sequence=sequence,
+                                  contigset_id=contigset.id))
+        db.session.add_all(contigs)
+        db.session.commit()
 
         obj_response.html_append('#contigsetList',
             '<li class="list-group-item">'
-            '{}</li>'.format(contigset_name))
+            '<span class="badge">{}</span>'
+            '{}</li>'.format(len(contigs), contigset_name))
+        obj_response.html_prepend('#binsetContigset',
+            '<option>{}</option>'.format(contigset_name))
+        obj_response.call('$("#binsetContigset").prop("selectedIndex", 0)')
 
     @staticmethod
     def binset_form_handler(obj_response, files, form_values):
@@ -135,71 +146,95 @@ class SijaxHandler(object):
                                     'Onjuiste input.')
             return
 
-        binsets = Binset.query.filter_by(name=binset_name,
-                                         userid=session['uid']).all()
-        if len(binsets) > 0: # Bins already uploaded
+        binset = Binset.query.filter_by(name=binset_name,
+                                        userid=session['uid']).first()
+        if binset is not None: # Bins already uploaded
             SijaxHandler._add_alert(obj_response, '#binsetAlerts',
                                     'Bins zijn al geupload.')
             return
 
         # Create new binset
-        binset = Binset(name=binset_name, userid=session['uid'])
+        binset = Binset(name=binset_name, userid=session['uid'],
+                        color=randcol.generate()[0])
         db.session.add(binset)
         db.session.commit()
 
+        #
+        bin_contigs = defaultdict(list)
+        contig_bins = {}
+        for contig_name, bin_name in utils.parse_dsv(bin_file):
+            bin_contigs[bin_name].append(contig_name)
+            contig_bins[contig_name] = bin_name
+
+        bin_objects = {}
+        for bin_name in bin_contigs:
+            bin = Bin(name=bin_name, binset_id=binset.id,
+                      color=randcol.generate()[0])
+            db.session.add(bin)
+            bin_objects[bin_name] = bin
+
         # Create contigset if none has been chosen.
         contigset = Contigset.query.filter_by(name=contigset_name,
-                                              userid=session['uid']).all()
-        if len(contigset) == 0:
+                                              userid=session['uid']).first()
+        if contigset is None:
             contigset = Contigset(name='', userid=session['uid'])
             db.session.add(contigset)
             db.session.commit()
             contigset.name = 'contigset{}'.format(contigset.id)
+            for bin_name, contigs in bin_contigs.items():
+                for contig_name in contigs:
+                    contig = Contig(header=contig_name,
+                                    contigset_id=contigset.id)
+                    bin_objects[bin_name].contigs.append(contig)
         else:
-            contigset = contigset[0]
-
-        # Add data to database
-        for line in bin_file.read().decode('utf-8').split('\n'):
-            if line == '':
-                continue
-            contig_name, bin_name = line.rstrip().split(',')
-
-            contigs = contigset.contigs.filter_by(header=contig_name).all()
-            if len(contigs) == 0:
-                contig = Contig(header=contig_name, contigset_id=contigset.id)
-                db.session.add(contig)
-            else:
-                contig = contigs[0]
-
-            # Should be 0 if the bin hasn't been added yet, and 1 if it's
-            # already been added in a previous iteration of the loop. If there
-            # is more than 1, something went wrong...
-            bins = binset.bins.filter_by(name=bin_name).all()
-            if len(bins) == 0:
-                bin = Bin(name=bin_name, binset_id=binset.id)
-                bin.contigs.append(contig)
-                db.session.add(bin)
-            elif len(bins) == 1:
-                bins[0].contigs.append(contig)
+            for contig in contigset.contigs:
+                bin_name = contig_bins.get(contig.header)
+                if bin_name:
+                    bin_objects[bin_name].contigs.append(contig)
         db.session.commit()
 
         obj_response.html_append('#binsetList',
                                  '<a href="#" class="list-group-item">'
                                  '{}</li>'.format(binset_name))
+        obj_response.html_append('.binsetSelect',
+                                 '<option>{}</option>'.format(binset_name))
+        obj_response.script('Sijax.request("bin_data")')
 
     @staticmethod
     def update_chord(obj_response, *bin_sets):
         app.logger.debug(bin_sets)
         binset1 = Binset.query.filter_by(userid=session['uid'],
-                                         name=bin_sets[0]).first()
+                                         name=bin_sets[0][0]).first()
+        bins1 = [bin for bin in binset1.bins.all() if bin.name in bin_sets[0][1]]
+        bins1 = utils.sort_bins(bins1)
         binset2 = Binset.query.filter_by(userid=session['uid'],
-                                         name=bin_sets[1]).first()
-        matrix = utils.to_matrix(binset1, binset2)
+                                         name=bin_sets[1][0]).first()
+        bins2 = [bin for bin in binset2.bins.all() if bin.name in bin_sets[1][1]]
+        bins2 = utils.sort_bins(bins2, reverse=True)
+        matrix = utils.to_matrix(bins1 + bins2)
         # TODO: store color in database someplace else
-        colors = ['#FFDD89' for _ in binset1.bins.all()]
-        colors.extend(['#957244' for _ in binset2.bins.all()])
+        colors = ['#FFDD89' for _ in bins1]
+        colors.extend(['#957244' for _ in bins2])
         obj_response.call('updateChord', [matrix, colors])
 
+    @staticmethod
+    def bin_data(obj_response):
+        binsets = Binset.query.filter_by(userid=session['uid']).all()
+        data = []
+        for binset in binsets:
+            binset_data = {'binset': binset.name, 'bins': [],
+                           'color': binset.color}
+            for bin in binset.bins.all():
+                binset_data['bins'].append({
+                    'name': bin.name,
+                    'contigs': [contig.header for contig in bin.contigs],
+                    'color': bin.color,
+                    'status': 'visible' # [visible, hidden, deleted]
+                })
+            data.append(binset_data)
+        obj_response.script('binsets = '
+                            'JSON.parse(\'{}\');'.format(json.dumps(data)))
+        obj_response.script('console.log("done")')
 
 ''' Views '''
 @app.before_request
@@ -209,7 +244,9 @@ def make_session_permanent():
 
 @flask_sijax.route(app, '/')
 def home():
+    new_user = False
     if not 'uid' in session:
+        new_user = True
         session['uid'] = str(uuid.uuid4())
 
     form_init_js = g.sijax.register_upload_callback('contigsetForm',
@@ -225,7 +262,8 @@ def home():
     contigsets = Contigset.query.filter_by(userid=session['uid']).all()
     binsets = Binset.query.filter_by(userid=session['uid']).all()
     return render_template('index.html', form_init_js=form_init_js,
-                           contigsets=contigsets, binsets=binsets)
+                           contigsets=contigsets, binsets=binsets,
+                           new_user=new_user)
 
 
 if __name__ == '__main__':
